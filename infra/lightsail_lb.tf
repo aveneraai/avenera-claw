@@ -15,11 +15,17 @@ resource "aws_lightsail_lb_attachment" "openclaw" {
 }
 
 # ── SSL Certificate ───────────────────────────────────────────────────────────
-# After apply, Terraform outputs the CNAME validation records that must be
-# added to your DNS provider before `aws_lightsail_lb_certificate_attachment`
-# can succeed. Run `terraform apply` once to create the cert, add the DNS
-# records, wait for validation (5–30 min), then `terraform apply` again to
-# attach the certificate and enable HTTPS.
+# Two-phase apply required:
+#
+#   Phase A (attach_certificate = false, the default):
+#     terraform apply
+#     → Check `terraform output cert_validation_records`
+#     → Add those CNAME records in your DNS provider
+#     → Wait 5–30 min for AWS to validate the certificate
+#
+#   Phase B (after validation is shown as VALID in the Lightsail console):
+#     terraform apply -var="attach_certificate=true"
+#     → Attaches the cert and enables the HTTPS redirect
 
 resource "aws_lightsail_lb_certificate" "openclaw" {
   name        = "${var.lb_name}-cert"
@@ -28,18 +34,17 @@ resource "aws_lightsail_lb_certificate" "openclaw" {
 }
 
 resource "aws_lightsail_lb_certificate_attachment" "openclaw" {
+  count = var.attach_certificate ? 1 : 0
+
   lb_name          = aws_lightsail_lb.openclaw.name
   certificate_name = aws_lightsail_lb_certificate.openclaw.name
-
-  # Prevents Terraform from trying to attach before DNS validation completes.
-  # If attachment fails, add the DNS CNAME records from the `cert_validation_records`
-  # output, wait for validation, then re-run `terraform apply`.
-  depends_on = [aws_lightsail_lb_certificate.openclaw]
 }
 
 # ── HTTPS Redirect ────────────────────────────────────────────────────────────
 
 resource "aws_lightsail_lb_https_redirection_policy" "openclaw" {
+  count = var.attach_certificate ? 1 : 0
+
   lb_name = aws_lightsail_lb.openclaw.name
   enabled = true
 

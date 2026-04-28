@@ -50,3 +50,9 @@ variable "iam_policy_name" {
   type        = string
   default     = "openclaw-bedrock-policy"
 }
+
+variable "attach_certificate" {
+  description = "Set to true only after the SSL certificate has been validated (CNAME records added and AWS shows VALID). See lightsail_lb.tf for the two-phase apply instructions."
+  type        = bool
+  default     = false
+}
