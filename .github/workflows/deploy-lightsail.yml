@@ -125,3 +125,25 @@ jobs:
 
             echo "==> Deploy complete"
             docker compose -f /opt/openclaw/docker-compose.prod.yml ps
+
+      - name: Write job summary
+        if: always()
+        run: |
+          IMAGE="ghcr.io/${{ github.repository }}:vaniam-ai"
+          GATEWAY_URL="${{ vars.GATEWAY_URL }}"
+          SHA="${{ github.sha }}"
+
+          echo "## Deploy summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$GATEWAY_URL" ]; then
+            echo "**Gateway location:** $GATEWAY_URL" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Gateway location:** Lightsail instance (set \`GATEWAY_URL\` variable to show URL)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image | \`$IMAGE\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${SHA:0:7}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Triggered by | ${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
