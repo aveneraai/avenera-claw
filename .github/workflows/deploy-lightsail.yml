@@ -82,22 +82,19 @@ jobs:
           script: |
             set -euo pipefail
 
-            IMAGE="ghcr.io/${{ github.repository }}:vaniam-ai"
+            export OPENCLAW_IMAGE="ghcr.io/${{ github.repository }}:vaniam-ai"
 
             echo "==> Logging in to GHCR"
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
-            echo "==> Pulling image: $IMAGE"
-            docker pull "$IMAGE"
+            echo "==> Pulling image: $OPENCLAW_IMAGE"
+            docker pull "$OPENCLAW_IMAGE"
 
             echo "==> Updating deployment"
-            OPENCLAW_IMAGE="$IMAGE" \
-              docker compose \
-                -f /opt/openclaw/docker-compose.prod.yml \
-                up -d --remove-orphans
+            docker compose -f /opt/openclaw/docker-compose.prod.yml up -d --remove-orphans
 
-            echo "==> Waiting for gateway to become healthy"
-            for i in $(seq 1 12); do
+            echo "==> Waiting for gateway to become healthy (up to 90s)"
+            for i in $(seq 1 18); do
               CONTAINER_ID=$(docker compose \
                 -f /opt/openclaw/docker-compose.prod.yml \
                 ps -q openclaw-gateway 2>/dev/null || true)
