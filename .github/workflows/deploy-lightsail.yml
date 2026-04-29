@@ -117,5 +117,11 @@ jobs:
               --filter "label=org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
               || true
 
+            echo "==> Applying post-deploy config"
+            docker compose -f /opt/openclaw/docker-compose.prod.yml \
+              exec -T openclaw-gateway \
+              node dist/index.js config set agents.defaults.model \
+              bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0 || true
+
             echo "==> Deploy complete"
             docker compose -f /opt/openclaw/docker-compose.prod.yml ps
