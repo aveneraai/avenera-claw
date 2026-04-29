@@ -1,6 +1,9 @@
 name: Deploy to Lightsail (vaniam-ai)
 
 on:
+  push:
+    branches:
+      - vaniam-ai
   workflow_dispatch:
     inputs:
       ref:
