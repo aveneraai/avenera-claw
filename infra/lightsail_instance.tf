@@ -1,7 +1,7 @@
 locals {
   user_data = <<-BASH
     #!/bin/bash
-    set -euo pipefail
+    set -eu
 
     # System update
     apt-get update -y
