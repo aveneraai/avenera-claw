@@ -143,6 +143,12 @@ docs/.generated/*.jsonl
 # Deprecated changelog fragment workflow
 changelog/fragments/
 
+# Terraform (infra/)
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.backup
+infra/terraform.tfvars
+
 # Local scratch workspace
 .tmp/
 .artifacts/
@@ -150,3 +156,6 @@ test/fixtures/openclaw-vitest-unit-report.json
 analysis/
 .artifacts/qa-e2e/
 extensions/qa-lab/web/dist/
+
+# SSH keys
+keys/
