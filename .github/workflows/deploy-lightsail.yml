@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - vaniam-ai
+    paths-ignore:
+      - 'infra/**'
   workflow_dispatch:
     inputs:
       ref:

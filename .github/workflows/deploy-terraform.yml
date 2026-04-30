@@ -1,0 +1,67 @@
+name: Terraform (vaniam-ai)
+
+on:
+  push:
+    branches:
+      - vaniam-ai
+    paths:
+      - 'infra/**'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or commit to apply
+        default: vaniam-ai
+        required: true
+
+env:
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  terraform:
+    name: Terraform Apply
+    runs-on: ubuntu-24.04
+    environment: production
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: infra
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.TF_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: "us-east-1"
+      TF_VAR_domain_name: "vaniam-ai.avenera.ai"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.6"
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=us-east-1"
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Terraform summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${GITHUB_SHA:0:7}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Triggered by | ${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
