@@ -11,6 +11,13 @@ locals {
     curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
     DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
 
+    # Inject CI deploy key so the deploy job can rsync after instance recreation
+    mkdir -p /home/ubuntu/.ssh
+    echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAMSoa+zyZBZrNyTP8JPB4IQdJiS2ScfAAug/M+bPCGW openclaw-ci-deploy' >> /home/ubuntu/.ssh/authorized_keys
+    chmod 700 /home/ubuntu/.ssh
+    chmod 600 /home/ubuntu/.ssh/authorized_keys
+    chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+
     # Create application directory structure
     mkdir -p /opt/openclaw/app
     chown -R ubuntu:ubuntu /opt/openclaw
