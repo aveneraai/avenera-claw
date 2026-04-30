@@ -125,9 +125,17 @@ jobs:
               docker ps -q --filter "publish=18789" | xargs -r docker stop || true
             fi
 
+            echo "==> Installing openclaw CLI globally"
+            {
+              echo '#!/bin/bash'
+              echo 'exec /usr/bin/node /opt/openclaw/app/openclaw.mjs "$@"'
+            } | sudo tee /usr/local/bin/openclaw > /dev/null
+            sudo chmod +x /usr/local/bin/openclaw
+
             echo "==> Applying pre-start config"
             cd /opt/openclaw/app
             node openclaw.mjs config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true || true
+            node openclaw.mjs config set gateway.mode local || true
             node openclaw.mjs config set agents.defaults.model \
               bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0 || true
 
