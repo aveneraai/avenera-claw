@@ -7,29 +7,45 @@ locals {
     apt-get update -y
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 
-    # Docker (official repo)
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-      -o /etc/apt/keyrings/docker.asc
-    chmod a+r /etc/apt/keyrings/docker.asc
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
-      https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-      > /etc/apt/sources.list.d/docker.list
-    apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-    # Allow ubuntu user to run docker without sudo
-    usermod -aG docker ubuntu
+    # Node.js 24 (official NodeSource repo)
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
 
     # Create application directory structure
-    mkdir -p /opt/openclaw/{state,workspace}
+    mkdir -p /opt/openclaw/app
     chown -R ubuntu:ubuntu /opt/openclaw
     chmod 700 /opt/openclaw
 
-    systemctl enable docker
-    systemctl start docker
+    # systemd service for the OpenClaw gateway
+    echo '[Unit]'                                                                   > /etc/systemd/system/openclaw-gateway.service
+    echo 'Description=OpenClaw Gateway'                                           >> /etc/systemd/system/openclaw-gateway.service
+    echo 'After=network-online.target'                                            >> /etc/systemd/system/openclaw-gateway.service
+    echo 'Wants=network-online.target'                                            >> /etc/systemd/system/openclaw-gateway.service
+    echo ''                                                                        >> /etc/systemd/system/openclaw-gateway.service
+    echo '[Service]'                                                               >> /etc/systemd/system/openclaw-gateway.service
+    echo 'Type=simple'                                                             >> /etc/systemd/system/openclaw-gateway.service
+    echo 'User=ubuntu'                                                             >> /etc/systemd/system/openclaw-gateway.service
+    echo 'Group=ubuntu'                                                            >> /etc/systemd/system/openclaw-gateway.service
+    echo 'WorkingDirectory=/opt/openclaw/app'                                     >> /etc/systemd/system/openclaw-gateway.service
+    echo 'EnvironmentFile=-/opt/openclaw/.env'                                    >> /etc/systemd/system/openclaw-gateway.service
+    echo 'Environment=HOME=/home/ubuntu'                                          >> /etc/systemd/system/openclaw-gateway.service
+    echo 'Environment=NODE_ENV=production'                                        >> /etc/systemd/system/openclaw-gateway.service
+    echo 'ExecStart=/usr/bin/node openclaw.mjs gateway --allow-unconfigured --bind lan --port 18789' >> /etc/systemd/system/openclaw-gateway.service
+    echo 'Restart=on-failure'                                                     >> /etc/systemd/system/openclaw-gateway.service
+    echo 'RestartSec=10'                                                          >> /etc/systemd/system/openclaw-gateway.service
+    echo 'StandardOutput=journal'                                                 >> /etc/systemd/system/openclaw-gateway.service
+    echo 'StandardError=journal'                                                  >> /etc/systemd/system/openclaw-gateway.service
+    echo 'SyslogIdentifier=openclaw-gateway'                                      >> /etc/systemd/system/openclaw-gateway.service
+    echo ''                                                                        >> /etc/systemd/system/openclaw-gateway.service
+    echo '[Install]'                                                               >> /etc/systemd/system/openclaw-gateway.service
+    echo 'WantedBy=multi-user.target'                                             >> /etc/systemd/system/openclaw-gateway.service
+
+    systemctl daemon-reload
+    systemctl enable openclaw-gateway
+
+    # Allow ubuntu to manage the openclaw service without a password prompt
+    echo 'ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl daemon-reload, /bin/systemctl enable openclaw-gateway, /bin/systemctl start openclaw-gateway, /bin/systemctl stop openclaw-gateway, /bin/systemctl restart openclaw-gateway, /bin/systemctl status openclaw-gateway' > /etc/sudoers.d/openclaw-gateway
+    chmod 440 /etc/sudoers.d/openclaw-gateway
   BASH
 }
 

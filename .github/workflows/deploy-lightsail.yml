@@ -13,19 +13,14 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push:
-    name: Build & Push Docker Image
+  build-and-deploy:
+    name: Build & Deploy to Lightsail
     runs-on: ubuntu-24.04
+    environment: production
     permissions:
       contents: read
-      packages: write
-    outputs:
-      image: ${{ steps.meta.outputs.tags }}
-      digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout ${{ inputs.ref }}
@@ -33,108 +28,90 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bundle A2UI (with stub fallback)
+        run: |
+          pnpm canvas:a2ui:bundle || {
+            mkdir -p src/canvas-host/a2ui
+            printf '/* A2UI bundle unavailable in this build */\n' \
+              > src/canvas-host/a2ui/a2ui.bundle.js
+            printf 'stub\n' > src/canvas-host/a2ui/.bundle.hash
+          }
 
-      - name: Extract image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=vaniam-ai
-            type=sha,prefix=vaniam-ai-,format=short
+      - name: Build app
+        run: |
+          pnpm build:docker
+          pnpm ui:build
+          pnpm qa:lab:build
 
-      - name: Build and push image
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          provenance: false
-          cache-from: type=gha,scope=vaniam-ai
-          cache-to: type=gha,scope=vaniam-ai,mode=max
-          build-args: |
-            OPENCLAW_VARIANT=default
+      - name: Prune to production deps
+        run: |
+          printf 'packages:\n  - .\n  - ui\n' > pnpm-workspace.yaml
+          CI=true NPM_CONFIG_FROZEN_LOCKFILE=false pnpm prune --prod
+          node scripts/postinstall-bundled-plugins.mjs
+          find dist -type f \
+            \( -name '*.d.ts' -o -name '*.d.mts' -o -name '*.d.cts' -o -name '*.map' \) \
+            -delete
 
-  deploy:
-    name: Deploy to Lightsail
-    needs: build-and-push
-    runs-on: ubuntu-24.04
-    environment: production
+      - name: Stage deploy files
+        run: |
+          mkdir -p _deploy
+          cp -a dist node_modules extensions skills docs qa _deploy/
+          cp package.json openclaw.mjs _deploy/
 
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
+      - name: Set up SSH
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_USER: ${{ github.repository_owner }}
+          LIGHTSAIL_SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$LIGHTSAIL_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.LIGHTSAIL_IP }}" >> ~/.ssh/known_hosts
+
+      - name: rsync app to VM
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            _deploy/ \
+            ubuntu@${{ secrets.LIGHTSAIL_IP }}:/opt/openclaw/app/
+
+      - name: Restart and verify gateway
+        uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.LIGHTSAIL_IP }}
           username: ubuntu
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
-          envs: GHCR_TOKEN,GHCR_USER
           script: |
             set -euo pipefail
 
-            export OPENCLAW_IMAGE="ghcr.io/${{ github.repository }}:vaniam-ai"
-
-            echo "==> Logging in to GHCR"
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-
-            echo "==> Pulling image: $OPENCLAW_IMAGE"
-            docker pull "$OPENCLAW_IMAGE"
-
-            echo "==> Updating deployment"
-            docker compose -f /opt/openclaw/docker-compose.prod.yml up -d --remove-orphans
+            echo "==> Reloading systemd and restarting gateway"
+            sudo systemctl daemon-reload
+            sudo systemctl enable openclaw-gateway
+            sudo systemctl restart openclaw-gateway
 
             echo "==> Waiting for gateway to become healthy (up to 90s)"
             for i in $(seq 1 18); do
-              CONTAINER_ID=$(docker compose \
-                -f /opt/openclaw/docker-compose.prod.yml \
-                ps -q openclaw-gateway 2>/dev/null || true)
-              STATUS="unknown"
-              if [ -n "$CONTAINER_ID" ]; then
-                STATUS=$(docker inspect \
-                  --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}running{{end}}' \
-                  "$CONTAINER_ID" 2>/dev/null || echo "unknown")
-              fi
-              if [ "$STATUS" = "healthy" ] || [ "$STATUS" = "running" ]; then
-                echo "Gateway is ${STATUS} after $((i * 5))s"
+              if curl -sf http://127.0.0.1:18789/healthz > /dev/null 2>&1; then
+                echo "Gateway is healthy after $((i * 5))s"
                 break
               fi
-              echo "  Waiting... ($STATUS)"
+              echo "  Waiting... ($((i * 5))s elapsed)"
               sleep 5
             done
 
-            echo "==> Pruning old images"
-            docker image prune -f \
-              --filter "label=org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-              || true
-
             echo "==> Applying post-deploy config"
-            docker compose -f /opt/openclaw/docker-compose.prod.yml \
-              exec -T openclaw-gateway \
-              node dist/index.js config set agents.defaults.model \
+            cd /opt/openclaw/app
+            node openclaw.mjs config set agents.defaults.model \
               bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0 || true
 
             echo "==> Deploy complete"
-            docker compose -f /opt/openclaw/docker-compose.prod.yml ps
+            sudo systemctl status openclaw-gateway --no-pager
 
       - name: Write job summary
         if: always()
         run: |
-          IMAGE="ghcr.io/${{ github.repository }}:vaniam-ai"
           GATEWAY_URL="${{ vars.GATEWAY_URL }}"
           SHA="${{ github.sha }}"
 
@@ -148,7 +125,6 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Image | \`$IMAGE\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Commit | \`${SHA:0:7}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Branch | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Triggered by | ${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"

@@ -18,15 +18,15 @@ The gateway is the control plane: it handles routing, authentication, agent exec
 
 The `vaniam-ai` branch is a deployment configuration targeting AWS Lightsail. It uses:
 
-- **AWS Lightsail Instance** (Ubuntu 22.04) as the runtime host — a persistent VM with a 160 GB SSD that survives redeploys
+- **AWS Lightsail Instance** (Ubuntu 22.04) as the runtime host — a persistent VM with a 640 GB SSD that survives redeploys
 - **AWS Bedrock** as the AI provider (Anthropic Claude models via managed API, no direct Anthropic key needed)
 - **Slack** as the primary messaging channel (Socket Mode — no public webhook URL required)
-- **GitHub Actions** for CI/CD — every push to `vaniam-ai` builds a Docker image, pushes it to GHCR, and deploys it to the instance over SSH
+- **GitHub Actions** for CI/CD — every push to `vaniam-ai` builds the app, rsyncs it to the instance over SSH, and restarts the gateway via systemd
 - **Terraform** (in `infra/`) for reproducible AWS infrastructure provisioning
 
 ### Why Lightsail Instance and not Lightsail Container Service?
 
-Lightsail Container Service has no persistent volume support. The gateway stores all state — configuration, sessions, workspace data — in `~/.openclaw/` and that state must survive redeploys. A Lightsail Instance gives a persistent SSD that lives as long as the instance does. The application itself still runs in Docker on that VM, giving reproducible builds without building on the instance and easy rollbacks via image tags.
+Lightsail Container Service has no persistent volume support. The gateway stores all state — configuration, sessions, workspace data — in `~/.openclaw/` and that state must survive redeploys. A Lightsail Instance gives a persistent SSD that lives as long as the instance does. The application runs as a systemd service directly on the VM, keeping the stack simple with no container daemon overhead.
 
 ---
 
@@ -39,17 +39,16 @@ Internet (HTTPS 443)
 Lightsail Load Balancer  ──── SSL termination (Let's Encrypt via your domain)
         │
         ▼  HTTP :18789
-Lightsail Instance  (Ubuntu 22.04, 4 vCPU, 8 GB RAM, 160 GB SSD — $40/mo)
-  ├── Docker Engine
-  │     └── openclaw-gateway container
-  │           image : ghcr.io/<owner>/<repo>:vaniam-ai
-  │           port  : 18789
-  │           volume: /opt/openclaw/state → /home/node/.openclaw  (persists on SSD)
+Lightsail Instance  (Ubuntu 22.04, 8 vCPU, 32 GB RAM, 640 GB SSD — $160/mo)
+  ├── openclaw-gateway  (Node.js systemd service)
+  │     app:   /opt/openclaw/app/
+  │     state: /home/ubuntu/.openclaw  (persists on SSD)
   └── Static IP (free when attached)
 
 GitHub Actions (push to vaniam-ai)
-  1. docker build → ghcr.io/<owner>/<repo>:<sha> + :vaniam-ai
-  2. SSH → docker compose pull && up -d → /healthz check
+  1. pnpm install + build + prune prod deps
+  2. rsync dist/ node_modules/ … → /opt/openclaw/app/
+  3. SSH → systemctl restart openclaw-gateway → /healthz check
 ```
 
 ### Request Flow
@@ -63,30 +62,30 @@ GitHub Actions (push to vaniam-ai)
 
 ### Persistent State
 
-All persistent data lives in `/opt/openclaw/state` on the instance SSD, bind-mounted into the container at `/home/node/.openclaw`. This includes:
+All persistent data lives in `/home/ubuntu/.openclaw` on the instance SSD. This includes:
 
-| Path (inside container) | Contents |
-|---|---|
-| `/home/node/.openclaw/openclaw.json` | Gateway configuration |
-| `/home/node/.openclaw/sessions/` | Agent session history |
-| `/home/node/.openclaw/workspace/` | Agent workspace files |
-| `/home/node/.openclaw/credentials/` | Channel credentials |
+| Path                                   | Contents              |
+| -------------------------------------- | --------------------- |
+| `/home/ubuntu/.openclaw/openclaw.json` | Gateway configuration |
+| `/home/ubuntu/.openclaw/sessions/`     | Agent session history |
+| `/home/ubuntu/.openclaw/workspace/`    | Agent workspace files |
+| `/home/ubuntu/.openclaw/credentials/`  | Channel credentials   |
 
-This data persists across container restarts, image updates, and redeploys. It does **not** survive instance deletion — take snapshots before destructive operations (see [Backup](#backup-state)).
+This data persists across service restarts and redeploys. It does **not** survive instance deletion — take snapshots before destructive operations (see [Backup](#backup-state)).
 
 ---
 
 ## Cost Estimate
 
-| Resource | Plan | $/mo |
-|---|---|---|
-| Lightsail Instance | 4 vCPU / 8 GB / 160 GB SSD | $40 |
-| Lightsail Load Balancer | 1 LB (SSL included) | $18 |
-| Static IP | Attached to instance | $0 |
-| Data transfer | 5 TB included | $0 |
-| **Total** | | **~$58** |
+| Resource                | Plan                        | $/mo      |
+| ----------------------- | --------------------------- | --------- |
+| Lightsail Instance      | 8 vCPU / 32 GB / 640 GB SSD | $160      |
+| Lightsail Load Balancer | 1 LB (SSL included)         | $18       |
+| Static IP               | Attached to instance        | $0        |
+| Data transfer           | 5 TB included               | $0        |
+| **Total**               |                             | **~$178** |
 
-GHCR is free for public repositories. Bedrock costs are pay-per-token on top of this.
+Bedrock costs are pay-per-token on top of this.
 
 ---
 
@@ -131,7 +130,8 @@ Collect these before starting:
 ├── .github/workflows/
 │   ├── deploy-lightsail.yml    CI/CD pipeline for this branch
 │   └── ...                     Other CI workflows
-├── Dockerfile                  Multi-stage production image
+├── openclaw.mjs                CLI / gateway entrypoint
+├── Dockerfile                  Multi-stage production image (for reference)
 ├── docker-compose.yml          Local development compose
 └── package.json                Root package (pnpm workspaces)
 ```
@@ -140,17 +140,17 @@ Collect these before starting:
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Runtime | Node.js 24 (min 22.16) |
-| Language | TypeScript (compiled to `dist/`) |
-| Package manager | pnpm workspaces |
-| Gateway framework | Express.js 5 + WebSockets (ws) |
-| AI providers | AWS Bedrock, Anthropic, OpenAI, Google GenAI, Ollama |
-| Channels | Slack, Telegram, Discord, WhatsApp, Signal, iMessage, Matrix, + more |
-| Containers | Docker (multi-stage), Docker Compose |
-| Infrastructure | AWS Lightsail, Terraform ≥ 1.6 |
-| CI/CD | GitHub Actions → GHCR |
+| Layer             | Technology                                                           |
+| ----------------- | -------------------------------------------------------------------- |
+| Runtime           | Node.js 24 (min 22.12)                                               |
+| Language          | TypeScript (compiled to `dist/`)                                     |
+| Package manager   | pnpm workspaces                                                      |
+| Gateway framework | Express.js 5 + WebSockets (ws)                                       |
+| AI providers      | AWS Bedrock, Anthropic, OpenAI, Google GenAI, Ollama                 |
+| Channels          | Slack, Telegram, Discord, WhatsApp, Signal, iMessage, Matrix, + more |
+| Process manager   | systemd                                                              |
+| Infrastructure    | AWS Lightsail, Terraform ≥ 1.6                                       |
+| CI/CD             | GitHub Actions (build + rsync + systemctl)                           |
 
 ---
 
@@ -171,7 +171,8 @@ terraform apply -var="domain_name=openclaw.yourdomain.com"
 ```
 
 This creates:
-- Lightsail instance (`openclaw-vaniam`) with Docker pre-installed via user-data
+
+- Lightsail instance (`openclaw-vaniam`) with Node.js 24 pre-installed via user-data, plus a systemd service unit for the gateway
 - Static IP attached to the instance
 - Firewall rules: SSH (22) and gateway port (18789)
 - Load balancer (`openclaw-lb`) with health check on `/healthz`
@@ -203,17 +204,17 @@ terraform output -raw bedrock_secret_access_key
 
 ### Available Terraform variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `aws_region` | `us-east-1` | AWS region |
-| `instance_name` | `openclaw-vaniam` | Lightsail instance name |
-| `bundle_id` | `large_3_0` | Instance plan (4 vCPU / 8 GB / 160 GB / $40mo) |
-| `blueprint_id` | `ubuntu_22_04` | OS image |
-| `lb_name` | `openclaw-lb` | Load balancer name |
-| `domain_name` | *(required)* | FQDN for SSL certificate |
-| `gateway_port` | `18789` | Gateway listen port |
-| `iam_user_name` | `openclaw-bedrock` | IAM user name |
-| `iam_policy_name` | `openclaw-bedrock-policy` | IAM policy name |
+| Variable          | Default                   | Description                                       |
+| ----------------- | ------------------------- | ------------------------------------------------- |
+| `aws_region`      | `us-east-1`               | AWS region                                        |
+| `instance_name`   | `openclaw-vaniam`         | Lightsail instance name                           |
+| `bundle_id`       | `2xlarge_3_0`             | Instance plan (8 vCPU / 32 GB / 640 GB / $160/mo) |
+| `blueprint_id`    | `ubuntu_22_04`            | OS image                                          |
+| `lb_name`         | `openclaw-lb`             | Load balancer name                                |
+| `domain_name`     | _(required)_              | FQDN for SSL certificate                          |
+| `gateway_port`    | `18789`                   | Gateway listen port                               |
+| `iam_user_name`   | `openclaw-bedrock`        | IAM user name                                     |
+| `iam_policy_name` | `openclaw-bedrock-policy` | IAM policy name                                   |
 
 ---
 
@@ -224,6 +225,7 @@ This step is manual — Terraform cannot do it.
 In AWS Console → **Bedrock** → **Model access** (in `us-east-1`):
 
 Enable at minimum:
+
 - `anthropic.claude-3-5-sonnet-20241022-v2:0` — recommended default model
 - `anthropic.claude-3-5-haiku-20241022-v1:0` — fast/cheap model for lightweight tasks
 
@@ -283,8 +285,8 @@ SSH into the instance and create the secrets file. This is done once manually. C
 ```bash
 ssh ubuntu@<STATIC_IP>
 
-# Confirm Docker is ready (user-data may still be running on a fresh instance)
-docker --version
+# Confirm Node.js is ready (user-data may still be running on a fresh instance)
+node --version
 
 # Create the secrets file
 sudo mkdir -p /opt/openclaw
@@ -310,64 +312,6 @@ sudo chown ubuntu:ubuntu /opt/openclaw/.env
 
 Generate the gateway token: `openssl rand -hex 32`
 
-### Create the production Docker Compose file
-
-```bash
-sudo tee /opt/openclaw/docker-compose.prod.yml > /dev/null <<'EOF'
-services:
-  openclaw-gateway:
-    image: ${OPENCLAW_IMAGE}
-    env_file:
-      - /opt/openclaw/.env
-    environment:
-      HOME: /home/node
-      TERM: xterm-256color
-      OPENCLAW_GATEWAY_BIND: lan
-    volumes:
-      - openclaw-state:/home/node/.openclaw
-      - openclaw-workspace:/home/node/.openclaw/workspace
-    ports:
-      - "18789:18789"
-    init: true
-    restart: unless-stopped
-    command:
-      - node
-      - dist/index.js
-      - gateway
-      - --allow-unconfigured
-      - --bind
-      - lan
-      - --port
-      - "18789"
-    healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-
-volumes:
-  openclaw-state:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /opt/openclaw/state
-  openclaw-workspace:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /opt/openclaw/workspace
-EOF
-
-sudo chown ubuntu:ubuntu /opt/openclaw/docker-compose.prod.yml
-```
-
 ---
 
 ## Phase 5 — GitHub Actions CI/CD
@@ -391,30 +335,19 @@ ssh ubuntu@<STATIC_IP> \
 
 Repository → **Settings** → **Secrets and variables** → **Actions**:
 
-| Secret | Value |
-|---|---|
-| `LIGHTSAIL_IP` | Static IP from `terraform output static_ip` |
+| Secret              | Value                                              |
+| ------------------- | -------------------------------------------------- |
+| `LIGHTSAIL_IP`      | Static IP from `terraform output static_ip`        |
 | `LIGHTSAIL_SSH_KEY` | Contents of `~/.ssh/openclaw_deploy` (private key) |
-
-`GITHUB_TOKEN` is built-in and used automatically for GHCR — no additional token needed for a public repository.
 
 ### Workflow: `.github/workflows/deploy-lightsail.yml`
 
-The workflow triggers on every push to `vaniam-ai` (or manual dispatch) and does two things:
+The workflow triggers on every push to `vaniam-ai` (or manual dispatch) and runs as a single job under the `production` environment:
 
-**Job 1 — Build & Push**
-- Checks out `vaniam-ai`
-- Builds the Docker image using the repo's multi-stage Dockerfile
-- Pushes two tags to GHCR:
-  - `:vaniam-ai` — mutable "latest for this branch" tag
-  - `:vaniam-ai-<sha>` — immutable tag for rollbacks
-- Uses GitHub Actions layer cache to keep repeat builds fast (5–8 min after the first 15–25 min cold build)
-
-**Job 2 — Deploy**
-- SSHs into the Lightsail instance
-- Runs `docker pull` then `docker compose up -d --remove-orphans`
-- Polls the container health status (up to 60 s) and exits non-zero if unhealthy
-- Prunes old images tagged from this repository
+1. **Build** — checks out the branch, installs deps, runs `pnpm build:docker` + `pnpm ui:build` + `pnpm qa:lab:build`, prunes to production deps
+2. **Stage** — assembles `dist/`, `node_modules/`, `extensions/`, `skills/`, `docs/`, `qa/`, `package.json`, `openclaw.mjs` into a local staging directory
+3. **rsync** — transfers the staging directory to `/opt/openclaw/app/` on the VM (only changed files)
+4. **Restart** — SSHs in, runs `systemctl restart openclaw-gateway`, polls `/healthz` for up to 90 s, then applies the Bedrock model config
 
 ### Trigger a deploy
 
@@ -428,28 +361,24 @@ Or manually: repository → **Actions** → **Deploy to Lightsail (vaniam-ai)** 
 
 ## Phase 6 — Post-Deploy Configuration
 
-After the gateway is healthy, configure providers and channels from inside the container:
+After the gateway is healthy, configure providers and channels directly on the instance:
 
 ```bash
 ssh ubuntu@<STATIC_IP>
-
-docker compose -f /opt/openclaw/docker-compose.prod.yml \
-  exec openclaw-gateway bash
-
-# Inside the container:
+cd /opt/openclaw/app
 
 # Set AWS Bedrock as the active provider
-node dist/index.js config set providers.default bedrock
-node dist/index.js config set providers.bedrock.region us-east-1
+node openclaw.mjs config set providers.default bedrock
+node openclaw.mjs config set providers.bedrock.region us-east-1
 
 # Enable the Slack channel
-node dist/index.js config set channels.slack.enabled true
+node openclaw.mjs config set channels.slack.enabled true
 
 # Verify
-node dist/index.js channels status
+node openclaw.mjs channels status
 ```
 
-Configuration is written to the named volume at `/home/node/.openclaw/openclaw.json` and persists across restarts and image updates.
+Configuration is written to `/home/ubuntu/.openclaw/openclaw.json` and persists across service restarts and redeploys.
 
 ---
 
@@ -470,7 +399,7 @@ curl -sf https://openclaw.yourdomain.com/healthz
 
 Lightsail Console → Load Balancers → `openclaw-lb` → **Target instances** — status must show `Healthy`.
 
-If unhealthy: confirm port 18789 is open in the instance firewall and the container is running.
+If unhealthy: confirm port 18789 is open in the instance firewall and the service is running.
 
 ### Control UI
 
@@ -483,8 +412,9 @@ Invite `@OpenClaw` to a Slack channel and send a message. The bot should respond
 ### Bedrock direct test
 
 ```bash
-# Inside the container
-node dist/index.js agent --message "say hello" --provider bedrock
+# On the instance
+cd /opt/openclaw/app
+node openclaw.mjs agent --message "say hello" --provider bedrock
 ```
 
 ---
@@ -493,23 +423,22 @@ node dist/index.js agent --message "say hello" --provider bedrock
 
 ### `/opt/openclaw/.env` (set manually on instance, never in CI)
 
-| Variable | Required | Description |
-|---|---|---|
-| `OPENCLAW_GATEWAY_TOKEN` | Yes | Strong random secret protecting the gateway API. Generate: `openssl rand -hex 32` |
-| `TZ` | No | Container timezone. Default: `UTC` |
-| `AWS_ACCESS_KEY_ID` | Yes | IAM access key from `terraform output bedrock_access_key_id` |
-| `AWS_SECRET_ACCESS_KEY` | Yes | IAM secret from `terraform output -raw bedrock_secret_access_key` |
-| `AWS_DEFAULT_REGION` | Yes | AWS region (`us-east-1` for widest Bedrock availability) |
-| `SLACK_BOT_TOKEN` | Yes | Bot user OAuth token (`xoxb-...`) |
-| `SLACK_APP_TOKEN` | Yes | Socket Mode app-level token (`xapp-...`) |
+| Variable                 | Required | Description                                                                       |
+| ------------------------ | -------- | --------------------------------------------------------------------------------- |
+| `OPENCLAW_GATEWAY_TOKEN` | Yes      | Strong random secret protecting the gateway API. Generate: `openssl rand -hex 32` |
+| `TZ`                     | No       | Timezone. Default: `UTC`                                                          |
+| `AWS_ACCESS_KEY_ID`      | Yes      | IAM access key from `terraform output bedrock_access_key_id`                      |
+| `AWS_SECRET_ACCESS_KEY`  | Yes      | IAM secret from `terraform output -raw bedrock_secret_access_key`                 |
+| `AWS_DEFAULT_REGION`     | Yes      | AWS region (`us-east-1` for widest Bedrock availability)                          |
+| `SLACK_BOT_TOKEN`        | Yes      | Bot user OAuth token (`xoxb-...`)                                                 |
+| `SLACK_APP_TOKEN`        | Yes      | Socket Mode app-level token (`xapp-...`)                                          |
 
-### Set by `docker-compose.prod.yml` (not in `.env`)
+### Set by the systemd service (not in `.env`)
 
-| Variable | Value | Description |
-|---|---|---|
-| `OPENCLAW_GATEWAY_BIND` | `lan` | Bind to all interfaces (required for the port mapping to work) |
-| `HOME` | `/home/node` | Required for state directory resolution |
-| `NODE_ENV` | `production` | Set in the Docker image |
+| Variable   | Value          | Description                |
+| ---------- | -------------- | -------------------------- |
+| `HOME`     | `/home/ubuntu` | State directory resolution |
+| `NODE_ENV` | `production`   | Node.js production mode    |
 
 ---
 
@@ -519,19 +448,16 @@ node dist/index.js agent --message "say hello" --provider bedrock
 
 ```bash
 # Live
-ssh ubuntu@<STATIC_IP> \
-  "docker compose -f /opt/openclaw/docker-compose.prod.yml logs -f"
+ssh ubuntu@<STATIC_IP> "journalctl -u openclaw-gateway -f"
 
 # Last 200 lines
-ssh ubuntu@<STATIC_IP> \
-  "docker compose -f /opt/openclaw/docker-compose.prod.yml logs --tail=200"
+ssh ubuntu@<STATIC_IP> "journalctl -u openclaw-gateway -n 200"
 ```
 
 ### Restart the gateway
 
 ```bash
-ssh ubuntu@<STATIC_IP> \
-  "docker compose -f /opt/openclaw/docker-compose.prod.yml restart openclaw-gateway"
+ssh ubuntu@<STATIC_IP> "sudo systemctl restart openclaw-gateway"
 ```
 
 ### Reload config without restart
@@ -539,36 +465,23 @@ ssh ubuntu@<STATIC_IP> \
 The gateway supports `SIGUSR1` for live config reload:
 
 ```bash
-ssh ubuntu@<STATIC_IP> \
-  "docker compose -f /opt/openclaw/docker-compose.prod.yml \
-   exec openclaw-gateway kill -USR1 1"
+ssh ubuntu@<STATIC_IP> "sudo systemctl kill -s USR1 openclaw-gateway"
 ```
 
-### Manual deploy / emergency update
+### Manual deploy
 
-```bash
-ssh ubuntu@<STATIC_IP>
-docker pull ghcr.io/<owner>/<repo>:vaniam-ai
-OPENCLAW_IMAGE=ghcr.io/<owner>/<repo>:vaniam-ai \
-  docker compose -f /opt/openclaw/docker-compose.prod.yml up -d
-```
+Trigger the GitHub Actions workflow from the UI, or push a commit to `vaniam-ai`.
 
-### Rollback to a previous build
+### Rollback to a previous commit
 
-Every deploy creates an immutable `:vaniam-ai-<sha>` tag. Find available tags in the repository → **Packages** on GitHub, then:
-
-```bash
-ssh ubuntu@<STATIC_IP>
-OPENCLAW_IMAGE=ghcr.io/<owner>/<repo>:vaniam-ai-<previous-sha> \
-  docker compose -f /opt/openclaw/docker-compose.prod.yml up -d
-```
+Trigger the workflow manually from GitHub UI and enter the specific commit SHA in the `ref` input.
 
 ### Backup state
 
 ```bash
 # Create archive on instance
 ssh ubuntu@<STATIC_IP> \
-  "tar czf /tmp/openclaw-state-$(date +%Y%m%d).tar.gz /opt/openclaw/state"
+  "tar czf /tmp/openclaw-state-$(date +%Y%m%d).tar.gz /home/ubuntu/.openclaw"
 
 # Copy to local machine
 scp ubuntu@<STATIC_IP>:/tmp/openclaw-state-*.tar.gz ./backups/
@@ -600,7 +513,7 @@ pnpm gateway:watch
 pnpm openclaw gateway --bind loopback --port 18789
 ```
 
-### Build the Docker image locally
+### Build the Docker image locally (for reference)
 
 ```bash
 docker build -t openclaw:local .

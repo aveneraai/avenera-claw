@@ -15,16 +15,14 @@ Internet (HTTPS 443)
 Lightsail Load Balancer  ── SSL termination (vaniam-ai.avenera.ai)
         │
         ▼  HTTP :18789
-Lightsail Instance  (4 vCPU / 8 GB / 160 GB SSD · $40/mo)
-  └── Docker Engine
-        └── openclaw-gateway container
-              image : ghcr.io/aveneraai/avenera-claw:vaniam-ai
-              port  : 18789
-              volume: /opt/openclaw/state → /home/node/.openclaw
+Lightsail Instance  (8 vCPU / 32 GB / 640 GB SSD · $160/mo)
+  └── openclaw-gateway  (Node.js process, managed by systemd)
+        state: /home/ubuntu/.openclaw
 
 GitHub Actions (push to vaniam-ai)
-  1. docker build → ghcr.io/aveneraai/avenera-claw:<sha> + :vaniam-ai
-  2. SSH → docker compose pull && up -d → /healthz check
+  1. pnpm install + build + prune prod deps
+  2. rsync dist/ node_modules/ … → /opt/openclaw/app/
+  3. SSH → systemctl restart openclaw-gateway → /healthz check
 ```
 
 ---
@@ -72,12 +70,11 @@ The GitHub Actions deploy key is at `keys/openclaw_deploy` (gitignored).
 
 ## Instance File Layout
 
-| Path                                    | Purpose                                                |
-| --------------------------------------- | ------------------------------------------------------ |
-| `/opt/openclaw/.env`                    | Secrets (gateway token, AWS keys, Slack tokens)        |
-| `/opt/openclaw/docker-compose.prod.yml` | Production Compose file                                |
-| `/opt/openclaw/state/`                  | Persistent gateway state (bind-mounted into container) |
-| `/opt/openclaw/workspace/`              | Agent workspace files                                  |
+| Path                     | Purpose                                         |
+| ------------------------ | ----------------------------------------------- |
+| `/opt/openclaw/.env`     | Secrets (gateway token, AWS keys, Slack tokens) |
+| `/opt/openclaw/app/`     | Deployed application (dist, node_modules, etc.) |
+| `/home/ubuntu/.openclaw` | Persistent gateway state and workspace          |
 
 ---
 
@@ -109,10 +106,11 @@ To edit: `sudo nano /opt/openclaw/.env`
 
 Workflow: `.github/workflows/deploy-lightsail.yml`
 
-Triggers on every push to `vaniam-ai`. Two jobs:
+Triggers on every push to `vaniam-ai`. Single job with the `production` environment:
 
-1. **Build & Push** — builds the Docker image, pushes `:vaniam-ai` and `:vaniam-ai-<sha>` tags to GHCR
-2. **Deploy** — SSHs into the instance, pulls the new image, runs `docker compose up -d`, polls `/healthz`
+1. **Build** — installs deps, runs `pnpm build:docker` + UI builds, prunes to production deps
+2. **rsync** — transfers `dist/`, `node_modules/`, `extensions/`, `skills/`, `docs/`, `qa/`, `package.json`, `openclaw.mjs` to `/opt/openclaw/app/` via rsync
+3. **Restart** — runs `systemctl restart openclaw-gateway`, polls `/healthz`
 
 **Trigger a deploy:**
 
@@ -122,38 +120,36 @@ git push origin vaniam-ai
 
 **Manual trigger:** GitHub → Actions → _Deploy to Lightsail (vaniam-ai)_ → Run workflow
 
-**Rollback to a previous build:**
+**Rollback to a previous commit:**
 
 ```bash
 ssh -i keys/LightsailDefaultKey-us-east-1.pem ubuntu@98.94.121.111
-OPENCLAW_IMAGE=ghcr.io/aveneraai/avenera-claw:vaniam-ai-<sha> \
-  docker compose -f /opt/openclaw/docker-compose.prod.yml up -d
+# Run the workflow manually from the desired commit SHA via GitHub UI
 ```
 
 ---
 
 ## Post-Deploy Configuration
 
-The deploy workflow automatically sets the Bedrock model after each deploy. For manual configuration or first-time setup, exec into the container:
+The deploy workflow automatically sets the Bedrock model after each deploy. For manual configuration or first-time setup, run commands directly on the instance:
 
 ```bash
 ssh -i keys/LightsailDefaultKey-us-east-1.pem ubuntu@98.94.121.111
-OPENCLAW_IMAGE=ghcr.io/aveneraai/avenera-claw:vaniam-ai \
-  docker compose -f /opt/openclaw/docker-compose.prod.yml exec openclaw-gateway bash
+cd /opt/openclaw/app
 ```
 
 ```bash
 # Set Bedrock as the default model (cross-region inference profile required)
-node dist/index.js config set agents.defaults.model bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0
+node openclaw.mjs config set agents.defaults.model bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0
 
 # Enable Slack (once tokens are configured in .env)
-node dist/index.js config set channels.slack.enabled true
+node openclaw.mjs config set channels.slack.enabled true
 
 # Allow the Control UI from the public domain
-node dist/index.js config set gateway.controlUi.allowedOrigins '["http://localhost:18789","http://127.0.0.1:18789","https://vaniam-ai.avenera.ai"]'
+node openclaw.mjs config set gateway.controlUi.allowedOrigins '["http://localhost:18789","http://127.0.0.1:18789","https://vaniam-ai.avenera.ai"]'
 
 # Verify
-node dist/index.js channels status
+node openclaw.mjs channels status
 ```
 
 ### Bedrock model
@@ -165,7 +161,7 @@ Active model: `us.anthropic.claude-sonnet-4-5-20250929-v1:0` (cross-region infer
 ### Test the agent
 
 ```bash
-node dist/index.js agent --local --message "say hello" --agent main
+node openclaw.mjs agent --local --message "say hello" --agent main
 ```
 
 ---
@@ -179,9 +175,9 @@ curl -sf http://localhost:18789/healthz
 # Gateway health (via load balancer)
 curl -sf https://vaniam-ai.avenera.ai/healthz
 
-# Container status
+# Service status
 ssh -i keys/LightsailDefaultKey-us-east-1.pem ubuntu@98.94.121.111 \
-  "docker compose -f /opt/openclaw/docker-compose.prod.yml ps"
+  "sudo systemctl status openclaw-gateway --no-pager"
 ```
 
 Load balancer health: Lightsail Console → Load Balancers → `openclaw-lb` → Target instances must show **Healthy**.
@@ -194,21 +190,21 @@ Load balancer health: Lightsail Console → Load Balancers → `openclaw-lb` →
 
 ```bash
 ssh -i keys/LightsailDefaultKey-us-east-1.pem ubuntu@98.94.121.111 \
-  "docker compose -f /opt/openclaw/docker-compose.prod.yml logs -f"
+  "journalctl -u openclaw-gateway -f"
 ```
 
 **Restart gateway:**
 
 ```bash
 ssh -i keys/LightsailDefaultKey-us-east-1.pem ubuntu@98.94.121.111 \
-  "docker compose -f /opt/openclaw/docker-compose.prod.yml restart openclaw-gateway"
+  "sudo systemctl restart openclaw-gateway"
 ```
 
 **Backup state:**
 
 ```bash
 ssh -i keys/LightsailDefaultKey-us-east-1.pem ubuntu@98.94.121.111 \
-  "tar czf /tmp/openclaw-state-$(date +%Y%m%d).tar.gz /opt/openclaw/state"
+  "tar czf /tmp/openclaw-state-$(date +%Y%m%d).tar.gz /home/ubuntu/.openclaw"
 scp -i keys/LightsailDefaultKey-us-east-1.pem \
   ubuntu@98.94.121.111:/tmp/openclaw-state-*.tar.gz ./backups/
 ```
