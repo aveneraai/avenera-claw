@@ -147,6 +147,8 @@ jobs:
 
             echo "==> Deploy complete"
             sudo systemctl status openclaw-gateway --no-pager
+            echo "==> Recent gateway logs"
+            sudo journalctl -u openclaw-gateway --no-pager -n 50
 
       - name: Write job summary
         if: always()
