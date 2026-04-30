@@ -12,6 +12,18 @@ data "aws_iam_policy_document" "bedrock" {
 
     resources = ["*"]
   }
+
+  statement {
+    sid    = "BedrockMarketplaceAccess"
+    effect = "Allow"
+
+    actions = [
+      "aws-marketplace:ViewSubscriptions",
+      "aws-marketplace:Subscribe",
+    ]
+
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_policy" "bedrock" {
