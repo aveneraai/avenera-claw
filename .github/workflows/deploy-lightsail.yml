@@ -125,6 +125,12 @@ jobs:
               docker ps -q --filter "publish=18789" | xargs -r docker stop || true
             fi
 
+            echo "==> Applying pre-start config"
+            cd /opt/openclaw/app
+            node openclaw.mjs config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true || true
+            node openclaw.mjs config set agents.defaults.model \
+              bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0 || true
+
             echo "==> Reloading systemd and restarting gateway"
             sudo systemctl daemon-reload
             sudo systemctl enable openclaw-gateway
@@ -139,11 +145,6 @@ jobs:
               echo "  Waiting... ($((i * 5))s elapsed)"
               sleep 5
             done
-
-            echo "==> Applying post-deploy config"
-            cd /opt/openclaw/app
-            node openclaw.mjs config set agents.defaults.model \
-              bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0 || true
 
             echo "==> Deploy complete"
             sudo systemctl status openclaw-gateway --no-pager
