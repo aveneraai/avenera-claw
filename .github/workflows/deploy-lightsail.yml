@@ -95,11 +95,13 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         env:
           OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
+          BEDROCK_AWS_ACCESS_KEY_ID: ${{ secrets.BEDROCK_AWS_ACCESS_KEY_ID }}
+          BEDROCK_AWS_SECRET_ACCESS_KEY: ${{ secrets.BEDROCK_AWS_SECRET_ACCESS_KEY }}
         with:
           host: ${{ secrets.LIGHTSAIL_IP }}
           username: ubuntu
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
-          envs: OPENCLAW_GATEWAY_TOKEN
+          envs: OPENCLAW_GATEWAY_TOKEN,BEDROCK_AWS_ACCESS_KEY_ID,BEDROCK_AWS_SECRET_ACCESS_KEY
           script: |
             set -euo pipefail
 
@@ -149,9 +151,13 @@ jobs:
             } | sudo tee /usr/local/bin/openclaw > /dev/null
             sudo chmod +x /usr/local/bin/openclaw
 
-            echo "==> Writing gateway token"
-            printf 'OPENCLAW_GATEWAY_TOKEN=%s\n' "${OPENCLAW_GATEWAY_TOKEN}" \
-              | sudo tee /opt/openclaw/.env > /dev/null
+            echo "==> Writing gateway token and Bedrock credentials"
+            {
+              printf 'OPENCLAW_GATEWAY_TOKEN=%s\n' "${OPENCLAW_GATEWAY_TOKEN}"
+              printf 'AWS_ACCESS_KEY_ID=%s\n' "${BEDROCK_AWS_ACCESS_KEY_ID}"
+              printf 'AWS_SECRET_ACCESS_KEY=%s\n' "${BEDROCK_AWS_SECRET_ACCESS_KEY}"
+              printf 'AWS_REGION=us-east-1\n'
+            } | sudo tee /opt/openclaw/.env > /dev/null
             sudo chmod 640 /opt/openclaw/.env
             sudo chown root:ubuntu /opt/openclaw/.env
             printf 'export OPENCLAW_GATEWAY_TOKEN=%s\n' "${OPENCLAW_GATEWAY_TOKEN}" \
