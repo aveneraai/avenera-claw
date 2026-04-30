@@ -120,6 +120,11 @@ jobs:
               echo 'WantedBy=multi-user.target'
             } | sudo tee /etc/systemd/system/openclaw-gateway.service > /dev/null
 
+            # Stop any Docker containers that may be holding port 18789
+            if command -v docker > /dev/null 2>&1; then
+              docker ps -q --filter "publish=18789" | xargs -r docker stop || true
+            fi
+
             echo "==> Reloading systemd and restarting gateway"
             sudo systemctl daemon-reload
             sudo systemctl enable openclaw-gateway
