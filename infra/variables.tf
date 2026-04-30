@@ -11,9 +11,9 @@ variable "instance_name" {
 }
 
 variable "bundle_id" {
-  description = "Lightsail bundle (plan) ID. large_3_0 = 4 vCPU / 8 GB / 160 GB SSD / $40 mo."
+  description = "Lightsail bundle (plan) ID. 2xlarge_3_0 = 8 vCPU / 32 GB / 640 GB SSD / $160 mo."
   type        = string
-  default     = "large_3_0"
+  default     = "2xlarge_3_0"
 }
 
 variable "blueprint_id" {
