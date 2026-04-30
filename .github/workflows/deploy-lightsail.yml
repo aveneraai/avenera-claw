@@ -86,6 +86,40 @@ jobs:
           script: |
             set -euo pipefail
 
+            # Install Node.js 24 if missing (handles VMs provisioned before this workflow)
+            if ! node --version 2>/dev/null | grep -qE '^v2[4-9]'; then
+              echo "==> Installing Node.js 24"
+              curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash -
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+            fi
+            echo "Node $(node --version)"
+
+            echo "==> Writing systemd service file"
+            {
+              echo '[Unit]'
+              echo 'Description=OpenClaw Gateway'
+              echo 'After=network-online.target'
+              echo 'Wants=network-online.target'
+              echo ''
+              echo '[Service]'
+              echo 'Type=simple'
+              echo 'User=ubuntu'
+              echo 'Group=ubuntu'
+              echo 'WorkingDirectory=/opt/openclaw/app'
+              echo 'EnvironmentFile=-/opt/openclaw/.env'
+              echo 'Environment=HOME=/home/ubuntu'
+              echo 'Environment=NODE_ENV=production'
+              echo 'ExecStart=/usr/bin/node openclaw.mjs gateway --allow-unconfigured --bind lan --port 18789'
+              echo 'Restart=on-failure'
+              echo 'RestartSec=10'
+              echo 'StandardOutput=journal'
+              echo 'StandardError=journal'
+              echo 'SyslogIdentifier=openclaw-gateway'
+              echo ''
+              echo '[Install]'
+              echo 'WantedBy=multi-user.target'
+            } | sudo tee /etc/systemd/system/openclaw-gateway.service > /dev/null
+
             echo "==> Reloading systemd and restarting gateway"
             sudo systemctl daemon-reload
             sudo systemctl enable openclaw-gateway
